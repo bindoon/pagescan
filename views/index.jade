@@ -1,2 +1,43 @@
-h1= title
-p Welcome to #{title}
+h1 扫描结果
+
+table(border=1)
+    tr
+        th 详细 
+        th 结果
+    tr
+        td root url 
+        td #{url}
+    tr
+        td 扫描类别 
+        - if (singlepage==true) 
+            td 单页面扫描
+        - else 
+            td 深度扫描
+    tr
+        td 扫描总连接数 
+        td #{urllist.getCount()}
+    tr
+        td 404链接数 
+        td #{link404.length}
+    tr
+        td 当前扫描队列
+        td #{scanlist}
+    tr
+        td 耗时
+        td #{costTime}
+
+h1 404 list
+table(border=1)
+    tr
+        th url 
+        th title
+        th 父链接
+    - if (link404.length)
+    - link404.forEach(function(item){
+    tr
+        td 
+            a(target='_blank',href='#{item.url}') #{item.url}
+        td !{item.title}
+        td 
+            a(target='_blank',href='#{urllist.hashTable[item.url]}') #{urllist.hashTable[item.url]}
+    -    })

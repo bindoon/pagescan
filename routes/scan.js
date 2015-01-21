@@ -1,6 +1,6 @@
 'use strict';
 
-var http = require('http'),
+var request = require('request'),
     urlparse = require('url').parse,
     hash = require('./hash');
 
@@ -65,7 +65,6 @@ var common = {
         }
     },
     getFatherDir : function(url) {
-        console.log(url);
         var num = url.lastIndexOf("/");
         if (num == -1) {
             return "";
@@ -107,21 +106,22 @@ function scan(o){
     this.requestQue= [];
     this.queue404= [];
     this.urllist = new hash(); // 已经检测的链接hash
-    this.host='';
-
+    this.startTime= 0;
     this._options={
         maxrequest:6,
-        siglepage:true,
-        ridestr : /javascript:|mailto:|https:\/\//ig, // 不检测正则表达式模式
+        singlepage:true,
+        ridestr : /^#|javascript:|mailto:|https:\/\//ig, // 不检测正则表达式模式
         url:'http://tw.taobao.com',
     }
     common.extend(this._options,o);
     var uparse = urlparse(this._options.url);
-    this.host = uparse.host;
-    this.hostname = uparse.hostname;
+    this.host = uparse.host;            //带端口号
+    this.hostname = uparse.hostname;    //不带端口
     this.port = uparse.port;
+    this.path = uparse.path;            //path带参数，pathname不带参数
+    this.fatherpath = common.getFatherDir(uparse.path);
 
-    if (this._options.siglepage) {
+    if (this._options.singlepage) {
         this.searchhtml=this.singlesearch;
     }else{
         this.searchhtml=this.deepsearch;
@@ -129,51 +129,58 @@ function scan(o){
 }
 
 scan.prototype={
-    searchhtml:function(){
+    searchhtml:function(body){
 
     },
-    singlesearch: function(url,fatherurl){
+    singlesearch: function(body,fatherurl){
         if (fatherurl!=this._options.url) {
             return;
         };
-        this._getAllLinkFromHtml(url,fatherurl);
+        this._getAllLinkFromHtml(body,fatherurl);
     },
-    deepsearch: function(){
-        this._getAllLinkFromHtml(url,fatherurl);
+    deepsearch: function(body,fatherurl){
+        this._getAllLinkFromHtml(body,fatherurl);
+    },
+    getUrlOpt: function(url,title){
+        url = common.trim(url);
+        if (url.length>2&&url[0]=='/'&&url[1]=='/') {    // 针对写法 //baidu.com/
+            url='http:'+url;
+        }
+        var pobj= urlparse(url);
+        var fullurl = null;
+        var path = pobj.path;
+        if (pobj.host==null) {  //相对路径
+            if (url[0]=='/') {
+                fullurl = 'http://'+this.hostname+pobj.path;
+            } else {
+                fullurl = 'http://'+this.hostname + this.fatherpath + '/' + pobj.path;
+                path = this.fatherpath +'/'+path;
+            }
+            pobj.host = this.host;
+        } else {    //cross domain
+            fullurl = pobj.href;
+        }
+        log(title,fullurl);
+
+        return {
+            host:pobj.host,
+            port:this.port,
+            path:path,
+            fullurl:fullurl,
+            title:title
+        };
+
     },
     linkcheck : function(url,title,fatherurl){
         if (!url||url.match(this._options.ridestr)){
             return;
         }
 
-        url = common.trim(url);
-        if (url.length>2&&url[0]=='/'&&url[1]=='/') {
-            url='http:'+url;
-        };
-        var pobj= urlparse(url);
-        
-        //跨域的,临时过滤掉
-        if (pobj.host!=this.host) {
-            return;
-        };
+        var opt = this.getUrlOpt(url,title);
 
-        var fullurl = null;
-        if (pobj.host==null||(pobj.host == this.host&&pobj.port==this.port)) {//同域名相对路径
-            fullurl = 'http://'+this.hostname+pobj.path;
-
-        }else{//cross domain
-            fullurl = pobj.protocol+'//'+pobj.hostname+pobj.path;
-        }
-        if (fullurl) {
-            if (!this.urllist.isKeyExists(fullurl)) {
-                this.urllist.add(fullurl,fatherurl);
-                var opt = {
-                    host:this.host,
-                    port:this.port,
-                    path:this.path,
-                    title:title,
-                    fullurl:fullurl
-                };
+        if (opt.fullurl) {
+            if (!this.urllist.isKeyExists(opt.fullurl)) {
+                this.urllist.add(opt.fullurl,fatherurl);
                 if (this.sessions<this._options.maxrequest) {
                     this.sendRequest(opt);
                 }else{
@@ -195,11 +202,10 @@ scan.prototype={
     _getAllLinkFromHtml : function(str, fatherurl) {
         var a = str.match(/<a .*?href\s*=.*?<\/a>/igm);
         if (a != null) {
-            var re=/<a.*href\s*=[\s\"\']?([^"]*)['"].*?[\s\"\']?[^>]*>(.*?)<\/a>/i;       
-            log('total link:%d',a.length);     
+            var re=/<a.*href\s*=[\s\"\']?([^\s"']*)[\s\"\']?[^>]*>(.*)<\/a>/i;
             for ( var i = 0; i < a.length; i++) {
                 var tmp = re.exec(a[i]);
-                if (tmp.length>2) {
+                if (tmp&&tmp.length>2) {
                     this.linkcheck(tmp[1],tmp[2],fatherurl);
                 }else{
                     continue;
@@ -209,7 +215,7 @@ scan.prototype={
     },
     sendRequest : function(opt){
         this.sessions++;
-        if (opt.host==this.host) {
+        if (opt.host==this.hostname&&opt.port==this.port) {
             this.samedomaincheck(opt);
         }else{
             this.crossdomain404Check(opt);
@@ -217,51 +223,45 @@ scan.prototype={
     },
     samedomaincheck: function(opt){
         var self = this;
-        var req = http.request(opt,function(res) {
-            if (res.statusCode==200) {
-                var body = '';
-                res.on('data',function(d){
-                    body += d;
-                }).on('end', function(){
+        request.get(opt.fullurl,function(error, response, body) {
+            if (!error ) {
+                if (response.statusCode == 200) {
                     self.searchhtml(body,opt.fullurl);
-                });            
-            }else {
-                if(res.statusCode==404){
+                } else if(response.statusCode==404){
                     self.queue404.push({url:opt.fullurl,title:opt.title});
                 }
+            } else {
+
             }
             self.sessions--;
             self.checkQueue(); //执行完成后检查队列
-        }).on('error', function(e) {
-            self.sessions--;
-            self.checkQueue(); //执行完成后检查队列
         });
-        req.end();
     },
     crossdomain404Check:function(opt){
         var self = this;
-        var req = http.request(opt,function(res) {
-            if (res.statusCode=200) {        
-            }else{
-                if(res.statusCode==404){
+
+        request.get(opt.fullurl,function(error, response, body) {
+            if (!error ) {
+                if (response.statusCode == 200) {
+                } else if(response.statusCode==404){
                     self.queue404.push({url:opt.fullurl,title:opt.title});
                 }
-            };
-            self.sessions--;
-            self.checkQueue(); //执行完成后检查队列
-        }).on('error', function(e) {
+            } 
             self.sessions--;
             self.checkQueue(); //执行完成后检查队列
         });
-        req.end();
     },
     run: function(){
+        this.startTime = new Date();
         this.sendRequest({
-            host:this.host,
+            host:this.hostname,
             port:this.port,
             path:this.path,
             fullurl:this._options.url
         })
+    },
+    getCostTime : function(){
+        return common.getCurTime(this.startTime);
     }
 };
 
